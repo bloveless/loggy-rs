@@ -1,0 +1,109 @@
+use logwatcher::{LogWatcher, LogWatcherAction};
+use notify::{Watcher, RecursiveMode, raw_watcher, Op};
+use std::sync::mpsc::channel;
+use std::collections::HashSet;
+use std::fs::File;
+use std::io::{BufReader, SeekFrom, Seek, BufRead};
+use tokio::sync::oneshot::{Receiver, Sender};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Create a channel to receive the events.
+    let (tx, rx) = channel();
+    let (broadcast_tx, _) = tokio::sync::broadcast::channel(16);
+
+    // Create a watcher object, delivering debounced events.
+    // The notification back-end is selected based on the platform.
+    let mut watcher = raw_watcher(tx).unwrap();
+
+    // Add a path to be watched. All files and directories at that path and
+    // below will be monitored for changes.
+    watcher.watch("/Users/brennon/Projects/loggy-rs/test-dir", RecursiveMode::Recursive).unwrap();
+
+    let mut watched_files: HashSet<String> = HashSet::new();
+
+    loop {
+        match rx.recv() {
+            Ok(event) => {
+                let path = event.path.unwrap().into_os_string().into_string().unwrap();
+                let operation = event.op? as Op;
+                match operation {
+                    Op::CREATE => {
+                        if !watched_files.contains(&path) {
+                            watched_files.insert(path.clone());
+                            println!("Now watching path: {}", path);
+                            let mut broadcast_rx = broadcast_tx.subscribe();
+
+                            tokio::spawn(async move {
+                                let mut reader;
+                                let mut pos = 0;
+
+                                match File::open(path.clone()) {
+                                    Ok(file) => {
+                                        reader = BufReader::new(file);
+                                        pos = 0;
+                                    }
+                                    Err(err) => {
+                                        println!("Error opening file");
+                                        return;
+                                    }
+                                }
+
+                                reader.seek(SeekFrom::Start(pos)).unwrap();
+
+                                loop {
+                                    let mut line = String::new();
+                                    let resp = reader.read_line(&mut line);
+                                    match resp {
+                                        Ok(len) => {
+                                            if len > 0 {
+                                                pos += len as u64;
+                                                reader.seek(SeekFrom::Start(pos)).unwrap();
+                                                println!("Line: {}", line.trim());
+                                                line.clear();
+                                            } else {
+                                                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                                            }
+                                        }
+                                        Err(err) => {
+                                            println!("{}", err);
+                                        }
+                                    }
+
+                                    match broadcast_rx.try_recv() {
+                                        Ok(close_path) => {
+                                            if close_path == path {
+                                                break;
+                                            }
+                                        }
+                                        Err(err) => {}
+                                    }
+                                }
+
+                                println!("Closing watcher for path: {}", path);
+                            });
+                        } else {
+                            println!("Path ({}) is already being watched", &path);
+                        }
+                    }
+                    Op::REMOVE => {
+                        if watched_files.contains(&path) {
+                            broadcast_tx.send(path.clone());
+                            watched_files.remove(&path);
+                            println!("Unwatching path {}", &path);
+                        }
+                    }
+                    // Op::WRITE
+                    // Op::CLOSE_WRITE
+                    // Op::CHMOD
+                    // Op::RENAME
+                    // Op::RESCAN
+                    _ => {
+                        println!("Unknown function {:?}", operation)
+                    }
+                }
+            }
+            Err(e) => println!("watch error: {:?}", e),
+        };
+    }
+}
