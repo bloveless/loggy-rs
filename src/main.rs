@@ -11,6 +11,9 @@ use regex::Regex;
 fn main() {
     let args: Vec<String> = env::args().collect();
     let watch_path = &args[1];
+    let hostname = hostname::get().unwrap().into_string().unwrap();
+    let cri_log_lines_regex = Regex::new(r"^([0-9-T:Z.]*) (std(?:err|out)) ([\S:]+) (.*)$").unwrap();
+
     // Create a channel to receive the events.
     let (tx, rx) = channel();
 
@@ -31,16 +34,38 @@ fn main() {
             Ok(event) => {
                 match event {
                     DebouncedEvent::NoticeWrite(path) => {
-                        println!("NoticeWrite: {}", path.into_os_string().into_string().unwrap());
+                        let path = path.into_os_string().into_string().unwrap();
+
+                        if path.contains(&hostname) {
+                            continue;
+                        }
+
+                        println!("NoticeWrite: {}", path);
                     }
                     DebouncedEvent::NoticeRemove(path) => {
-                        println!("NoticeRemove: {}", path.into_os_string().into_string().unwrap());
+                        let path = path.into_os_string().into_string().unwrap();
+
+                        if path.contains(&hostname) {
+                            continue;
+                        }
+
+                        println!("NoticeRemove: {}", path);
                     }
                     DebouncedEvent::Create(path) => {
-                        println!("Create: {}", path.into_os_string().into_string().unwrap());
+                        let path = path.into_os_string().into_string().unwrap();
+
+                        if path.contains(&hostname) {
+                            continue;
+                        }
+
+                        println!("Create: {}", path);
                     }
                     DebouncedEvent::Write(path) => {
                         let path = path.into_os_string().into_string().unwrap();
+
+                        if path.contains(&hostname) {
+                            continue;
+                        }
 
                         println!("Write: {}", path.clone());
 
@@ -59,7 +84,12 @@ fn main() {
                                 Ok(len) => {
                                     if len > 0 {
                                         *pos += len as u64;
-                                        println!("Line: {}", line);
+                                        println!("File: {}", path);
+                                        let log_lines = parse_cri_log_lines(
+                                            &cri_log_lines_regex,
+                                            line
+                                        );
+                                        println!("Parsed Log Lines: {:?}", log_lines);
                                     } else {
                                         break;
                                     }
@@ -71,22 +101,49 @@ fn main() {
                         }
                     }
                     DebouncedEvent::Chmod(path) => {
-                        println!("Chmod: {}", path.into_os_string().into_string().unwrap());
+                        let path = path.into_os_string().into_string().unwrap();
+
+                        if path.contains(&hostname) {
+                            continue;
+                        }
+
+                        println!("Chmod: {}", path);
                     }
                     DebouncedEvent::Remove(path) => {
-                        println!("Remove: {}", path.into_os_string().into_string().unwrap());
+                        let path = path.into_os_string().into_string().unwrap();
+
+                        if path.contains(&hostname) {
+                            continue;
+                        }
+
+                        println!("Remove: {}", path);
                     }
                     DebouncedEvent::Rename(source_path, dest_path) => {
-                        println!("Rename from {} to {}", source_path.into_os_string().into_string().unwrap(), dest_path.into_os_string().into_string().unwrap());
+                        let path = source_path.into_os_string().into_string().unwrap();
+
+                        if path.contains(&hostname) {
+                            continue;
+                        }
+
+                        println!("Rename from {} to {}", path, dest_path.into_os_string().into_string().unwrap());
                     }
                     DebouncedEvent::Rescan => {
                         println!("Rescan");
                     }
                     DebouncedEvent::Error(err, path) => {
-                        if let Some(path) = path {
-                            println!("Error {} path {}", err, path.into_os_string().into_string().unwrap());
-                        } else {
-                            println!("Error {}", err);
+                        match path {
+                            Some(path) => {
+                                let path = path.into_os_string().into_string().unwrap();
+
+                                if path.contains(&hostname) {
+                                    continue;
+                                }
+
+                                println!("Error {} path {}", err, path);
+                            }
+                            None => {
+                                println!("Error {}", err);
+                            }
                         }
                     }
                 }
@@ -110,24 +167,31 @@ struct LogLine {
     line: String,
 }
 
-fn parse_cri_log_lines(lines: String) -> Vec<LogLine> {
+fn parse_cri_log_lines(cri_log_lines_regex: &Regex, lines: String) -> Vec<LogLine> {
     let mut log_lines = Vec::<LogLine>::new();
     for line in lines.split("\n") {
-        log_lines.push(parse_cri_log_line(line.to_string()));
+        if let Some(log_line) = parse_cri_log_line(cri_log_lines_regex, line.to_string()) {
+            log_lines.push(log_line);
+        }
     }
 
     log_lines
 }
 
-fn parse_cri_log_line(line: String) -> LogLine {
-    let re = Regex::new(r"^([0-9-T:Z.]*) (std(?:err|out)) ([\S:]+) (.*)$").unwrap();
-    let cap = re.captures(&line).unwrap();
-
-    LogLine {
-        datetime: DateTime::parse_from_rfc3339(&cap[1]).unwrap(),
-        stream: if &cap[2] == "stdout" { OutputStream::StdOut } else { OutputStream::StdErr },
-        tags: cap[3].split(':').map(|i| i.to_string()).collect(),
-        line: cap[4].to_string(),
+fn parse_cri_log_line(cri_log_lines_regex: &Regex, line: String) -> Option<LogLine> {
+    match cri_log_lines_regex.captures(&line) {
+        Some(cap) => {
+            Some(LogLine {
+                datetime: DateTime::parse_from_rfc3339(&cap[1]).unwrap(),
+                stream: if &cap[2] == "stdout" { OutputStream::StdOut } else { OutputStream::StdErr },
+                tags: cap[3].split(':').map(|i| i.to_string()).collect(),
+                line: cap[4].to_string(),
+            })
+        }
+        None => {
+            println!("Found line that didn't match regex: \"{}\"", line);
+            None
+        }
     }
 }
 
@@ -177,13 +241,13 @@ mod tests {
                 datetime: DateTime::parse_from_rfc3339("2021-01-15T17:52:00.032616721+00:00").unwrap(),
                 stream: OutputStream::StdOut,
                 tags: vec!["F".to_string()],
-                line: "  \"status\": 200,".to_string()
+                line: "  \"status\": 200,".to_string(),
             },
             LogLine {
                 datetime: DateTime::parse_from_rfc3339("2021-01-15T17:52:00.032635758+00:00").unwrap(),
                 stream: OutputStream::StdOut,
                 tags: vec!["F".to_string()],
-                line: "  \"headers\": {".to_string()
+                line: "  \"headers\": {".to_string(),
             }
         ]);
 
@@ -197,19 +261,19 @@ mod tests {
                 datetime: DateTime::parse_from_rfc3339("2021-01-15T17:52:00.049462502Z").unwrap(),
                 stream: OutputStream::StdOut,
                 tags: vec!["F".to_string()],
-                line: "^[[0mPOST /gaction/fulfillment ^[[32m200^[[0m 10.169 ms - 161^[[0m".to_string()
+                line: "^[[0mPOST /gaction/fulfillment ^[[32m200^[[0m 10.169 ms - 161^[[0m".to_string(),
             },
             LogLine {
                 datetime: DateTime::parse_from_rfc3339("2021-01-16T10:11:07.88429767Z").unwrap(),
                 stream: OutputStream::StdOut,
                 tags: vec!["F".to_string()],
-                line: "^[[0mGET / ^[[33m404^[[0m 4.801 ms - 139^[[0m".to_string()
+                line: "^[[0mGET / ^[[33m404^[[0m 4.801 ms - 139^[[0m".to_string(),
             },
             LogLine {
                 datetime: DateTime::parse_from_rfc3339("2021-01-17T17:15:19.906752568Z").unwrap(),
                 stream: OutputStream::StdOut,
                 tags: vec!["F".to_string()],
-                line: "^[[0mGET / ^[[33m404^[[0m 4.442 ms - 139^[[0m".to_string()
+                line: "^[[0mGET / ^[[33m404^[[0m 4.442 ms - 139^[[0m".to_string(),
             },
         ]);
     }

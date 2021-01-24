@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: loggy
+  namespace: kube-system
+  labels:
+    app: loggy
+spec:
+  selector:
+    matchLabels:
+      app: loggy
+  template:
+    metadata:
+      labels:
+        app: loggy
+    spec:
+      tolerations:
+        # this toleration is to have the daemonset runnable on master nodes
+        # remove it if your masters can't run pods
+        - key: node-role.kubernetes.io/master
+          effect: NoSchedule
+      containers:
+        - name: loggy
+          image: bloveless/loggy-rs:0.0.1-alpha.6
+          command:
+            - /root/loggy-rs
+            - /var/log/pods
+          resources:
+            limits:
+              memory: 200Mi
+            requests:
+              cpu: 100m
+              memory: 200Mi
+          volumeMounts:
+            - name: varlogcontainers
+              mountPath: /var/log/containers
+              readOnly: true
+            - name: varlogpods
+              mountPath: /var/log/pods
+              readOnly: true
+          imagePullPolicy: Always
+          env:
+            - name: RUST_BACKTRACE
+              value: "full"
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - name: varlogcontainers
+          hostPath:
+            path: /var/log/containers
+        - name: varlogpods
+          hostPath:
+            path: /var/log/pods

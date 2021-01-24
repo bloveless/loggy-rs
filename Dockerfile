@@ -2,7 +2,7 @@
 ##### Builder
 ###########################################################
 
-FROM rust:slim-buster AS builder
+FROM rust:1.49.0-slim-buster AS builder
 
 RUN mkdir /app
 
@@ -18,14 +18,10 @@ RUN cargo build --release
 
 FROM debian:buster-slim
 
-RUN useradd --create-home loggy
+WORKDIR /root
 
-WORKDIR /home/loggy
+COPY --from=builder /app/target/release/loggy-rs /root/loggy-rs
 
-COPY --from=builder --chown=loggy:loggy /app/target/release/loggy-rs /home/loggy/loggy-rs
+RUN mkdir /data
 
-RUN mkdir /data && chown -R loggy:loggy /data
-
-USER loggy
-
-CMD ["/home/loggy/loggy-rs", "/data"]
+CMD ["/root/loggy-rs", "/data"]
